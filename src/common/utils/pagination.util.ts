@@ -1,5 +1,5 @@
 import { PaginatedResponse, PaginationParams } from '../interfaces/pagination.interface';
-import { SelectQueryBuilder } from 'typeorm';
+import { SelectQueryBuilder, ObjectLiteral } from 'typeorm';
 
 /**
  * Pagination Utility
@@ -30,7 +30,7 @@ export class PaginationUtil {
    * @param params - Pagination parameters
    * @returns Modified query builder
    */
-  static applyPagination<T>(
+  static applyPagination<T extends ObjectLiteral>(
     queryBuilder: SelectQueryBuilder<T>,
     params: PaginationParams,
   ): SelectQueryBuilder<T> {
@@ -54,7 +54,7 @@ export class PaginationUtil {
    * @param defaultSortBy - Default sort field
    * @returns Modified query builder
    */
-  static applySorting<T>(
+  static applySorting<T extends ObjectLiteral>(
     queryBuilder: SelectQueryBuilder<T>,
     params: PaginationParams,
     alias: string,
@@ -76,7 +76,7 @@ export class PaginationUtil {
    * @param params - Pagination parameters
    * @returns Paginated response
    */
-  static async paginate<T>(
+  static async paginate<T extends ObjectLiteral>(
     queryBuilder: SelectQueryBuilder<T>,
     params: PaginationParams,
   ): Promise<PaginatedResponse<T>> {

@@ -482,7 +482,12 @@ export class TasksService {
     const cacheKey = `task:stats:${userId || 'all'}`;
 
     // Try cache first
-    const cached = await this.cacheService.get(cacheKey);
+    const cached = await this.cacheService.get<{
+      total: number;
+      byStatus: Record<TaskStatus, number>;
+      byPriority: Record<TaskPriority, number>;
+      overdue: number;
+    }>(cacheKey);
     if (cached) {
       return cached;
     }
@@ -654,7 +659,6 @@ export class TasksService {
       [TaskStatus.PENDING]: 0,
       [TaskStatus.IN_PROGRESS]: 0,
       [TaskStatus.COMPLETED]: 0,
-      [TaskStatus.CANCELLED]: 0,
     };
 
     results.forEach(row => {
@@ -675,7 +679,6 @@ export class TasksService {
       [TaskPriority.LOW]: 0,
       [TaskPriority.MEDIUM]: 0,
       [TaskPriority.HIGH]: 0,
-      [TaskPriority.URGENT]: 0,
     };
 
     results.forEach(row => {

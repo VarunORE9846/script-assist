@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { Request, Response, NextFunction } from 'express';
 
 /**
  * Bootstrap the NestJS application
@@ -50,8 +51,8 @@ async function bootstrap() {
   });
 
   // Request body size limit (prevent DOS attacks)
-  app.use((req, res, next) => {
-    req.on('data', (chunk) => {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    req.on('data', (chunk: Buffer) => {
       // Limit: 10MB
       if (chunk.length > 10 * 1024 * 1024) {
         res.status(413).json({
