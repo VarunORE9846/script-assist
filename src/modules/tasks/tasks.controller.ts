@@ -1,162 +1,245 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards, Query, HttpException, HttpStatus, UseInterceptors } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+  Query,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+} from '@nestjs/common';
 import { TasksService } from './tasks.service';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Task } from './entities/task.entity';
-import { TaskStatus } from './enums/task-status.enum';
-import { TaskPriority } from './enums/task-priority.enum';
-import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
-import { RateLimit } from '../../common/decorators/rate-limit.decorator';
+import { TaskFilterDto } from './dto/task-filter.dto';
+import { ApiBearerAuth, ApiOperation, ApiTags, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RedisRateLimitGuard } from '../../common/guards/redis-rate-limit.guard';
+import { OwnershipGuard } from '../../common/guards/ownership.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { RedisRateLimit, RateLimitPresets } from '../../common/decorators/rate-limit-redis.decorator';
+import { CheckOwnership } from '../../common/decorators/ownership.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { PaginationParams } from '../../common/interfaces/pagination.interface';
+import { PaginationUtil } from '../../common/utils/pagination.util';
 
-// This guard needs to be implemented or imported from the correct location
-// We're intentionally leaving it as a non-working placeholder
-class JwtAuthGuard {}
-
+/**
+ * Refactored Tasks Controller
+ * 
+ * IMPROVEMENTS:
+ * 1. NO DIRECT REPOSITORY ACCESS - All operations through service layer
+ * 2. PROPER GUARDS - Authentication, authorization, ownership checks
+ * 3. RATE LIMITING - Distributed Redis-backed rate limiting
+ * 4. DB-LEVEL OPERATIONS - No in-memory filtering/pagination
+ * 5. PROPER ERROR HANDLING - Consistent error responses
+ * 6. USER CONTEXT - All operations scoped to current user
+ * 
+ * Security features:
+ * - JWT authentication required
+ * - Ownership checks on modifications
+ * - Role-based access for admin operations
+ * - Rate limiting per endpoint
+ */
 @ApiTags('tasks')
 @Controller('tasks')
-@UseGuards(JwtAuthGuard, RateLimitGuard)
-@RateLimit({ limit: 100, windowMs: 60000 })
+@UseGuards(JwtAuthGuard, RedisRateLimitGuard)
 @ApiBearerAuth()
 export class TasksController {
   constructor(
     private readonly tasksService: TasksService,
-    // Anti-pattern: Controller directly accessing repository
-    @InjectRepository(Task)
-    private taskRepository: Repository<Task>
+    // NO REPOSITORY INJECTION - Service layer handles all data access
   ) {}
 
+  /**
+   * Create a new task
+   * 
+   * Automatically assigns task to current user
+   */
   @Post()
+  @HttpCode(HttpStatus.CREATED)
+  @RedisRateLimit(RateLimitPresets.MODERATE)
   @ApiOperation({ summary: 'Create a new task' })
-  create(@Body() createTaskDto: CreateTaskDto) {
-    return this.tasksService.create(createTaskDto);
-  }
-
-  @Get()
-  @ApiOperation({ summary: 'Find all tasks with optional filtering' })
-  @ApiQuery({ name: 'status', required: false })
-  @ApiQuery({ name: 'priority', required: false })
-  @ApiQuery({ name: 'page', required: false })
-  @ApiQuery({ name: 'limit', required: false })
-  async findAll(
-    @Query('status') status?: string,
-    @Query('priority') priority?: string,
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
+  @ApiResponse({ status: 201, description: 'Task created successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid input' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async create(
+    @Body() createTaskDto: CreateTaskDto,
+    @CurrentUser('id') userId: string,
   ) {
-    // Inefficient approach: Inconsistent pagination handling
-    if (page && !limit) {
-      limit = 10; // Default limit
-    }
-    
-    // Inefficient processing: Manual filtering instead of using repository
-    let tasks = await this.tasksService.findAll();
-    
-    // Inefficient filtering: In-memory filtering instead of database filtering
-    if (status) {
-      tasks = tasks.filter(task => task.status === status as TaskStatus);
-    }
-    
-    if (priority) {
-      tasks = tasks.filter(task => task.priority === priority as TaskPriority);
-    }
-    
-    // Inefficient pagination: In-memory pagination
-    if (page && limit) {
-      const startIndex = (page - 1) * limit;
-      const endIndex = page * limit;
-      tasks = tasks.slice(startIndex, endIndex);
-    }
-    
-    return {
-      data: tasks,
-      count: tasks.length,
-      // Missing metadata for proper pagination
-    };
+    return this.tasksService.create(createTaskDto, userId);
   }
 
+  /**
+   * Get all tasks with filtering, sorting, and pagination
+   * 
+   * All operations done at database level for efficiency
+   */
+  @Get()
+  @RedisRateLimit(RateLimitPresets.LENIENT)
+  @ApiOperation({ summary: 'Find all tasks with filtering and pagination' })
+  @ApiQuery({ name: 'status', required: false, description: 'Filter by status' })
+  @ApiQuery({ name: 'priority', required: false, description: 'Filter by priority' })
+  @ApiQuery({ name: 'search', required: false, description: 'Search in title/description' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number', type: Number })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page', type: Number })
+  @ApiQuery({ name: 'sortBy', required: false, description: 'Sort field' })
+  @ApiQuery({ name: 'sortOrder', required: false, enum: ['ASC', 'DESC'] })
+  @ApiResponse({ status: 200, description: 'Tasks retrieved successfully' })
+  async findAll(
+    @Query() filters: TaskFilterDto,
+    @Query() paginationParams: PaginationParams,
+    @CurrentUser('id') userId: string,
+  ) {
+    // Validate and sanitize pagination params
+    const pagination = PaginationUtil.validateParams(paginationParams);
+    
+    // Get tasks (all filtering/pagination done in DB)
+    return this.tasksService.findAll(filters, pagination, userId);
+  }
+
+  /**
+   * Get task statistics
+   * 
+   * Uses DB aggregation for efficiency (no in-memory filtering)
+   */
   @Get('stats')
+  @RedisRateLimit(RateLimitPresets.LENIENT)
   @ApiOperation({ summary: 'Get task statistics' })
-  async getStats() {
-    // Inefficient approach: N+1 query problem
-    const tasks = await this.taskRepository.find();
-    
-    // Inefficient computation: Should be done with SQL aggregation
-    const statistics = {
-      total: tasks.length,
-      completed: tasks.filter(t => t.status === TaskStatus.COMPLETED).length,
-      inProgress: tasks.filter(t => t.status === TaskStatus.IN_PROGRESS).length,
-      pending: tasks.filter(t => t.status === TaskStatus.PENDING).length,
-      highPriority: tasks.filter(t => t.priority === TaskPriority.HIGH).length,
-    };
-    
-    return statistics;
+  @ApiResponse({ status: 200, description: 'Statistics retrieved successfully' })
+  async getStats(@CurrentUser('id') userId: string) {
+    return this.tasksService.getStatistics(userId);
   }
 
+  /**
+   * Get a single task by ID
+   * 
+   * Ownership check ensures users can only access their own tasks
+   */
   @Get(':id')
+  @UseGuards(OwnershipGuard)
+  @CheckOwnership({ entity: 'task', paramKey: 'id', userIdField: 'userId' })
+  @RedisRateLimit(RateLimitPresets.LENIENT)
   @ApiOperation({ summary: 'Find a task by ID' })
-  async findOne(@Param('id') id: string) {
-    const task = await this.tasksService.findOne(id);
-    
-    if (!task) {
-      // Inefficient error handling: Revealing internal details
-      throw new HttpException(`Task with ID ${id} not found in the database`, HttpStatus.NOT_FOUND);
-    }
-    
-    return task;
+  @ApiResponse({ status: 200, description: 'Task found' })
+  @ApiResponse({ status: 404, description: 'Task not found' })
+  @ApiResponse({ status: 403, description: 'Forbidden - not your task' })
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.tasksService.findOne(id, userId);
   }
 
+  /**
+   * Update a task
+   * 
+   * Ownership guard ensures users can only update their own tasks
+   */
   @Patch(':id')
+  @UseGuards(OwnershipGuard)
+  @CheckOwnership({ entity: 'task', paramKey: 'id', userIdField: 'userId' })
+  @RedisRateLimit(RateLimitPresets.MODERATE)
   @ApiOperation({ summary: 'Update a task' })
-  update(@Param('id') id: string, @Body() updateTaskDto: UpdateTaskDto) {
-    // No validation if task exists before update
-    return this.tasksService.update(id, updateTaskDto);
+  @ApiResponse({ status: 200, description: 'Task updated successfully' })
+  @ApiResponse({ status: 404, description: 'Task not found' })
+  @ApiResponse({ status: 403, description: 'Forbidden - not your task' })
+  async update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() updateTaskDto: UpdateTaskDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.tasksService.update(id, updateTaskDto, userId);
   }
 
+  /**
+   * Delete a task
+   * 
+   * Ownership guard ensures users can only delete their own tasks
+   */
   @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(OwnershipGuard)
+  @CheckOwnership({ entity: 'task', paramKey: 'id', userIdField: 'userId' })
+  @RedisRateLimit(RateLimitPresets.MODERATE)
   @ApiOperation({ summary: 'Delete a task' })
-  remove(@Param('id') id: string) {
-    // No validation if task exists before removal
-    // No status code returned for success
-    return this.tasksService.remove(id);
+  @ApiResponse({ status: 204, description: 'Task deleted successfully' })
+  @ApiResponse({ status: 404, description: 'Task not found' })
+  @ApiResponse({ status: 403, description: 'Forbidden - not your task' })
+  async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    await this.tasksService.remove(id, userId);
   }
 
-  @Post('batch')
-  @ApiOperation({ summary: 'Batch process multiple tasks' })
-  async batchProcess(@Body() operations: { tasks: string[], action: string }) {
-    // Inefficient batch processing: Sequential processing instead of bulk operations
-    const { tasks: taskIds, action } = operations;
-    const results = [];
+  /**
+   * Batch update tasks
+   * 
+   * Uses single bulk UPDATE query for efficiency
+   * Strict rate limiting to prevent abuse
+   */
+  @Post('batch/update')
+  @UseGuards(RolesGuard)
+  @Roles('admin', 'user')
+  @RedisRateLimit(RateLimitPresets.BATCH)
+  @ApiOperation({ summary: 'Batch update multiple tasks' })
+  @ApiResponse({ status: 200, description: 'Tasks updated successfully' })
+  async batchUpdate(
+    @Body() operations: { taskIds: string[]; updates: Partial<UpdateTaskDto> },
+    @CurrentUser('id') userId: string,
+    @CurrentUser('role') userRole: string,
+  ) {
+    const { taskIds, updates } = operations;
     
-    // N+1 query problem: Processing tasks one by one
-    for (const taskId of taskIds) {
-      try {
-        let result;
-        
-        switch (action) {
-          case 'complete':
-            result = await this.tasksService.update(taskId, { status: TaskStatus.COMPLETED });
-            break;
-          case 'delete':
-            result = await this.tasksService.remove(taskId);
-            break;
-          default:
-            throw new HttpException(`Unknown action: ${action}`, HttpStatus.BAD_REQUEST);
-        }
-        
-        results.push({ taskId, success: true, result });
-      } catch (error) {
-        // Inconsistent error handling
-        results.push({ 
-          taskId, 
-          success: false, 
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
-    }
+    // Admin can update any tasks, users can only update their own
+    const targetUserId = userRole === 'admin' ? undefined : userId;
     
-    return results;
+    const affected = await this.tasksService.batchUpdate(
+      taskIds,
+      updates,
+      targetUserId,
+    );
+
+    return {
+      success: true,
+      affected,
+      message: `Updated ${affected} task(s)`,
+    };
+  }
+
+  /**
+   * Batch delete tasks
+   * 
+   * Uses single bulk DELETE query for efficiency
+   * Strict rate limiting to prevent abuse
+   */
+  @Post('batch/delete')
+  @UseGuards(RolesGuard)
+  @Roles('admin', 'user')
+  @RedisRateLimit(RateLimitPresets.BATCH)
+  @ApiOperation({ summary: 'Batch delete multiple tasks' })
+  @ApiResponse({ status: 200, description: 'Tasks deleted successfully' })
+  async batchDelete(
+    @Body() operations: { taskIds: string[] },
+    @CurrentUser('id') userId: string,
+    @CurrentUser('role') userRole: string,
+  ) {
+    const { taskIds } = operations;
+    
+    // Admin can delete any tasks, users can only delete their own
+    const targetUserId = userRole === 'admin' ? undefined : userId;
+    
+    const affected = await this.tasksService.batchDelete(taskIds, targetUserId);
+
+    return {
+      success: true,
+      affected,
+      message: `Deleted ${affected} task(s)`,
+    };
   }
 } 

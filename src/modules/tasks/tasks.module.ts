@@ -4,7 +4,18 @@ import { BullModule } from '@nestjs/bullmq';
 import { TasksService } from './tasks.service';
 import { TasksController } from './tasks.controller';
 import { Task } from './entities/task.entity';
+import { RedisCacheService } from '../../common/services/redis-cache.service';
+import { OwnershipGuard } from '../../common/guards/ownership.guard';
 
+/**
+ * Tasks Module
+ * 
+ * Enhanced with:
+ * - Redis caching for performance
+ * - Ownership guards for security
+ * - Transaction support
+ * - Queue processing
+ */
 @Module({
   imports: [
     TypeOrmModule.forFeature([Task]),
@@ -13,7 +24,7 @@ import { Task } from './entities/task.entity';
     }),
   ],
   controllers: [TasksController],
-  providers: [TasksService],
+  providers: [TasksService, RedisCacheService, OwnershipGuard],
   exports: [TasksService],
 })
 export class TasksModule {} 

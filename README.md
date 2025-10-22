@@ -18,14 +18,67 @@ The TaskFlow API is a task management system with significant scalability, perfo
 
 ## Getting Started
 
-### Prerequisites
+You can run this project in two ways:
+1. **🐳 Docker (Recommended)** - Easiest setup with hot reloading
+2. **💻 Local Development** - Traditional setup
+
+### 🐳 Docker Setup (Recommended)
+
+#### Prerequisites
+- Docker Desktop (Windows/Mac) or Docker Engine + Docker Compose (Linux)
+
+#### Quick Start
+
+```bash
+# Start all services (NestJS, PostgreSQL, Redis)
+docker-compose up --build
+
+# In a new terminal, run migrations
+docker-compose exec app bun run migration:custom
+
+# Seed the database
+docker-compose exec app bun run seed
+```
+
+**Access the application:**
+- API: http://localhost:3000
+- Swagger: http://localhost:3000/api
+
+**Hot reloading is enabled!** Changes to files in `src/` will automatically restart the app.
+
+📖 **For detailed Docker instructions, see [DOCKER_README.md](./DOCKER_README.md)**
+
+#### Helper Scripts
+
+**Windows (PowerShell):**
+```powershell
+.\scripts\docker-dev.ps1 start          # Start services
+.\scripts\docker-dev.ps1 migrate        # Run migrations
+.\scripts\docker-dev.ps1 seed           # Seed database
+.\scripts\docker-dev.ps1 logs           # View logs
+```
+
+**Linux/Mac:**
+```bash
+chmod +x scripts/docker-dev.sh
+./scripts/docker-dev.sh start           # Start services
+./scripts/docker-dev.sh migrate         # Run migrations
+./scripts/docker-dev.sh seed            # Seed database
+./scripts/docker-dev.sh logs            # View logs
+```
+
+---
+
+### 💻 Local Development Setup
+
+#### Prerequisites
 
 - Node.js (v16+)
 - Bun (latest version)
 - PostgreSQL
 - Redis
 
-### Setup Instructions
+#### Setup Instructions
 
 1. Clone this repository
 2. Install dependencies:
